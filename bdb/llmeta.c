@@ -2653,6 +2653,11 @@ int bdb_add_dummy_llmeta(void)
     }
 
 retry:
+    if (bdb_lock_desired(llmeta_bdb_state->parent)) {
+        logmsg(LOGMSG_ERROR, "%s short-circuiting because bdb_lock_desired\n",
+                __func__);
+        return -1;
+    }
     tran = bdb_tran_begin(llmeta_bdb_state, NULL, &bdberr);
     if (tran == NULL)
         goto fail;
@@ -2673,7 +2678,15 @@ retry:
         goto fail;
     }
 
-    rc = bdb_tran_commit(llmeta_bdb_state, tran, &bdberr);
+    seqnum_type ss;
+    rc = bdb_tran_commit_with_seqnum_size(llmeta_bdb_state, tran, &ss, NULL,
+                                          &bdberr);
+
+    if (rc == 0) {
+        int timeoutms;
+        rc = bdb_wait_for_seqnum_from_all_adaptive_newcoh(llmeta_bdb_state, &ss, 0, &timeoutms);
+    }
+    // rc = bdb_tran_commit(llmeta_bdb_state, tran, &bdberr);
     if (rc && bdberr != BDBERR_NOERROR) {
         logmsg(LOGMSG_ERROR, "%s bdb_tran_commit rc: %d bdberr: %d\n", __func__, rc,
                 bdberr);
@@ -4343,14 +4356,16 @@ done:
 }
 
 int bdb_get_disable_plan_genid(bdb_state_type *bdb_state, tran_type *tran,
-                               unsigned long long *genid, int *bdberr)
+                               unsigned long long *genid, unsigned int *host,
+                               int *bdberr)
 {
     int rc;
     char key[LLMETA_IXLEN] = {0};
     struct llmeta_file_type_key file_type_key;
     int fndlen;
     uint8_t *p_buf = (uint8_t *)key, *p_buf_end = (p_buf + LLMETA_IXLEN);
-    unsigned long long tmpgenid;
+    int data_sz = sizeof(unsigned long long) + sizeof(unsigned int);
+    uint8_t *data_buf = alloca(data_sz);
 
     *bdberr = BDBERR_NOERROR;
 
@@ -4363,22 +4378,29 @@ int bdb_get_disable_plan_genid(bdb_state_type *bdb_state, tran_type *tran,
         return -1;
     }
 
-    rc = bdb_lite_exact_fetch_tran(llmeta_bdb_state, tran, key, &tmpgenid,
-                                   sizeof(tmpgenid), &fndlen, bdberr);
-    if (rc == 0)
-        *genid = tmpgenid;
+    rc = bdb_lite_exact_fetch_tran(llmeta_bdb_state, tran, key, data_buf,
+                                   data_sz, &fndlen, bdberr);
+    if (rc == 0) {
+        *genid = *(unsigned long long *)data_buf;
+        *host = ntohl(*(unsigned int *)(data_buf + sizeof(unsigned long long)));
+    }
     return rc;
 }
 
 int bdb_set_disable_plan_genid(bdb_state_type *bdb_state, tran_type *tran,
-                               unsigned long long genid, int *bdberr)
+                               unsigned long long genid, unsigned int host,
+                               int *bdberr)
 {
     int rc;
     int started_our_own_transaction = 0;
     char key[LLMETA_IXLEN] = {0};
     struct llmeta_file_type_key file_type_key;
-    unsigned long long genidlcl = genid;
     uint8_t *p_buf = (uint8_t *)key, *p_buf_end = (p_buf + LLMETA_IXLEN);
+
+    int data_sz = sizeof(unsigned long long) + sizeof(unsigned int);
+    uint8_t *data_buf = alloca(data_sz);
+    *(unsigned long long *)data_buf = genid;
+    *(unsigned int *)(data_buf + sizeof(unsigned long long)) = htonl(host);
 
     *bdberr = BDBERR_NOERROR;
 
@@ -4401,11 +4423,11 @@ int bdb_set_disable_plan_genid(bdb_state_type *bdb_state, tran_type *tran,
         goto done;
     }
 
-    rc = bdb_get_disable_plan_genid(bdb_state, tran, &genid, bdberr);
+    rc = bdb_get_disable_plan_genid(bdb_state, tran, &genid, &host, bdberr);
     if (rc) { //not found, just add -- should refactor
         if (*bdberr == BDBERR_FETCH_DTA) {
-            rc = bdb_lite_add(llmeta_bdb_state, tran, &genidlcl,
-                              sizeof(unsigned long long), key, bdberr);
+            rc = bdb_lite_add(llmeta_bdb_state, tran, data_buf, data_sz, key,
+                              bdberr);
         } 
         goto done;
     }
@@ -4414,8 +4436,7 @@ int bdb_set_disable_plan_genid(bdb_state_type *bdb_state, tran_type *tran,
     if (rc && *bdberr != BDBERR_DEL_DTA)
         goto done;
 
-    rc = bdb_lite_add(llmeta_bdb_state, tran, &genidlcl,
-                      sizeof(unsigned long long), key, bdberr);
+    rc = bdb_lite_add(llmeta_bdb_state, tran, data_buf, data_sz, key, bdberr);
 
 done:
     if (started_our_own_transaction) {
@@ -6948,14 +6969,9 @@ void llmeta_list_tablename_alias(void)
 
 bdb_state_type *bdb_llmeta_bdb_state(void) { return llmeta_bdb_state; }
 
-/**
- *  Increment the TABLE VERSION ENTRY for table "bdb_state->name".
- *  If an entry doesn't exist, an entry with value 1 is created (default 0 means
- * non-existing)
- *
- */
-int bdb_table_version_upsert(bdb_state_type *bdb_state, tran_type *tran,
-                             int *bdberr)
+static int bdb_table_version_upsert_int(bdb_state_type *bdb_state,
+                                        tran_type *tran,
+                                        unsigned long long *val, int *bdberr)
 {
     struct llmeta_sane_table_version schema_version;
     char *tblname = bdb_state->name;
@@ -6996,7 +7012,7 @@ int bdb_table_version_upsert(bdb_state_type *bdb_state, tran_type *tran,
     }
 
     /* find the existing record, if any */
-    rc = bdb_table_version_select(bdb_state, tran, &version, bdberr);
+    rc = bdb_table_version_select(bdb_state->name, tran, &version, bdberr);
     if (rc) {
         *bdberr = BDBERR_MISC;
         return -1;
@@ -7027,7 +7043,11 @@ int bdb_table_version_upsert(bdb_state_type *bdb_state, tran_type *tran,
     }
 
     /* add new entry */
-    version++;
+    if (val) {
+        version = *val;
+    } else {
+        version++;
+    }
 
     version = flibc_htonll(version);
     rc = bdb_lite_add(llmeta_bdb_state, tran, &version, sizeof(version), key,
@@ -7038,6 +7058,29 @@ int bdb_table_version_upsert(bdb_state_type *bdb_state, tran_type *tran,
 
     *bdberr = BDBERR_NOERROR;
     return 0;
+}
+
+/**
+ *  Increment the TABLE VERSION ENTRY for table "bdb_state->name".
+ *  If an entry doesn't exist, an entry with value 1 is created (default 0 means
+ * non-existing)
+ *
+ */
+int bdb_table_version_upsert(bdb_state_type *bdb_state, tran_type *tran,
+                             int *bdberr)
+{
+    return bdb_table_version_upsert_int(bdb_state, tran, NULL, bdberr);
+}
+
+/**
+ * Set the TABLE VERSION ENTRY for table "bdb_state->name" to "val"
+ * (It creates or, if existing, updates an entry)
+ *
+ */
+int bdb_table_version_update(bdb_state_type *bdb_state, tran_type *tran,
+                             unsigned long long val, int *bdberr)
+{
+    return bdb_table_version_upsert_int(bdb_state, tran, &val, bdberr);
 }
 
 /**
@@ -7086,7 +7129,7 @@ int bdb_table_version_delete(bdb_state_type *bdb_state, tran_type *tran,
     }
 
     /* find the existing record, if any */
-    rc = bdb_table_version_select(bdb_state, tran, &version, bdberr);
+    rc = bdb_table_version_select(bdb_state->name, tran, &version, bdberr);
     if (rc) {
         *bdberr = BDBERR_MISC;
         return -1;
@@ -7125,14 +7168,13 @@ int bdb_table_version_delete(bdb_state_type *bdb_state, tran_type *tran,
  *  If an entry doesn't exist, version 0 is returned
  *
  */
-int bdb_table_version_select(bdb_state_type *bdb_state, tran_type *tran,
+int bdb_table_version_select(const char *tblname, tran_type *tran,
                              unsigned long long *version, int *bdberr)
 {
     struct llmeta_sane_table_version schema_version;
     char key[LLMETA_IXLEN] = {0};
     char fnddata[sizeof(*version)];
     int fnddatalen;
-    const char *tblname = bdb_state->name;
     int tblnamelen;
     uint8_t *p_buf, *p_buf_end;
     int retries;
@@ -7228,16 +7270,15 @@ retry:
  *  1: not found
  * -1: error
  */
-static int llmeta_get_blob(llmetakey_t key, const char *table, char **value,
-                           int *len)
+static int llmeta_get_blob(llmetakey_t key, tran_type *tran, const char *table,
+                           char **value, int *len)
 {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     fprintf(stderr, "%s\n", __func__);
 #endif
     if (llmeta_bdb_state == NULL)
         return -1;
     int rc, bdberr;
-    void *tran;
     char *tmpstr = NULL;
     char llkey[LLMETA_IXLEN] = {0};
     int retry = 0;
@@ -7249,14 +7290,14 @@ static int llmeta_get_blob(llmetakey_t key, const char *table, char **value,
                strnlen(table, LLMETA_IXLEN - sizeof(key)));
 
 rep:
-    if ((rc = bdb_lite_exact_var_fetch_tran(llmeta_bdb_state, NULL, llkey,
+    if ((rc = bdb_lite_exact_var_fetch_tran(llmeta_bdb_state, tran, llkey,
                                             (void **)&tmpstr, len, &bdberr)) ==
         0) {
         assert(tmpstr != NULL);
         *value = malloc(*len + 1);
         strncpy(*value, tmpstr, *len);
         (*value)[*len] = '\0';
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
         fprintf(
             stderr,
             "%s: bdb_lite_exact_fetch_tran found:%s *len:%d rc:%d bdberr:%d\n",
@@ -7264,7 +7305,7 @@ rep:
 #endif
         free(tmpstr);
     } else if (bdberr == BDBERR_FETCH_DTA) {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
         fprintf(stderr,
                 "%s: bdb_lite_exact_fetch_tran not found rc:%d bdberr:%d\n",
                 __func__, rc, bdberr);
@@ -7289,7 +7330,7 @@ static int llmeta_del_set_blob(void *parent_tran, llmetakey_t key,
                                const char *table, const char *value, int len,
                                int deleteonly)
 {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     fprintf(stderr, "%s\n", __func__);
 #endif
     if (llmeta_bdb_state == NULL)
@@ -7328,7 +7369,7 @@ rep:
         goto err;
     }
 
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     tmpstr[fndlen - 1] = '\0';
     fprintf(
         stderr,
@@ -7387,9 +7428,10 @@ static inline int llmeta_set_blob(void *parent_tran, llmetakey_t key,
 /* return parameters for tbl into value
  * NB: caller needs to free that memory area
  */
-int bdb_get_table_csonparameters(const char *table, char **value, int *len)
+int bdb_get_table_csonparameters(tran_type *tran, const char *table,
+                                 char **value, int *len)
 {
-    return llmeta_get_blob(LLMETA_TABLE_PARAMETERS, table, value, len);
+    return llmeta_get_blob(LLMETA_TABLE_PARAMETERS, tran, table, value, len);
 }
 
 int bdb_set_table_csonparameters(void *parent_tran, const char *table,
@@ -7412,7 +7454,7 @@ int bdb_del_table_csonparameters(void *parent_tran, const char *table)
 int bdb_get_table_parameter(const char *table, const char *parameter,
                             char **value)
 {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     fprintf(stderr, "%s()\n", __func__);
 #endif
     if (llmeta_bdb_state == NULL)
@@ -7420,7 +7462,7 @@ int bdb_get_table_parameter(const char *table, const char *parameter,
 
     char *blob = NULL;
     int len;
-    int rc = bdb_get_table_csonparameters(table, &blob, &len);
+    int rc = bdb_get_table_csonparameters(NULL, table, &blob, &len);
     assert(rc == 0 || (rc == 1 && blob == NULL));
 
     if (blob == NULL)
@@ -7448,7 +7490,7 @@ int bdb_get_table_parameter(const char *table, const char *parameter,
 
     cson_value *param = cson_object_get(rootObj, parameter);
     if (param == NULL) {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
         printf("param %s not found\n", parameter);
 #endif
         rc = 1;
@@ -7458,7 +7500,7 @@ int bdb_get_table_parameter(const char *table, const char *parameter,
     cson_string const *str = cson_value_get_string(param);
     *value = strdup(cson_string_cstr(str));
 
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     fprintf(stdout, "%s\n", cson_string_cstr(str));
     fprintf(stdout, "%s\n", *value);
     { // print root object
@@ -7495,12 +7537,12 @@ out:
 int bdb_set_table_parameter(void *parent_tran, const char *table,
                             const char *parameter, const char *value)
 {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     fprintf(stderr, "%s()\n", __func__);
 #endif
     char *blob = NULL;
     int len;
-    int rc = bdb_get_table_csonparameters(table, &blob, &len);
+    int rc = bdb_get_table_csonparameters(parent_tran, table, &blob, &len);
     assert(rc == 0 || (rc == 1 && blob == NULL));
 
     cson_value *rootV = NULL;
@@ -7533,7 +7575,7 @@ int bdb_set_table_parameter(void *parent_tran, const char *table,
     if (value == NULL) {
         cson_value *param = cson_object_get(rootObj, parameter);
         if (param == NULL) {
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
             printf("param %s not found -- nothing to do\n", parameter);
 #endif
             cson_value_free(rootV);
@@ -7555,7 +7597,7 @@ int bdb_set_table_parameter(void *parent_tran, const char *table,
                         cson_value_new_string(value, strlen(value)));
     }
 
-#ifdef DEBUG
+#ifdef DEBUG_LLMETA
     { // print root object
         cson_object_iterator iter;
         rc = cson_object_iter_init(rootObj, &iter);

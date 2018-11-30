@@ -1258,8 +1258,53 @@ REGISTER_TUNABLE("logmsg.timestamp", "Stamp all messages with timestamp.",
 REGISTER_TUNABLE("logmsg.notimestamp", "Disables 'syslog.timestamp'.",
                  TUNABLE_BOOLEAN, NULL, INVERSE_VALUE | NOARG | READEARLY,
                  logmsg_timestamp_value, NULL, logmsg_timestamp_update, NULL);
+REGISTER_TUNABLE("block_set_commit_genid_trace",
+                 "Print trace when blocking set commit_genid. (Default: off)",
+                 TUNABLE_BOOLEAN, &gbl_block_set_commit_genid_trace, INTERNAL,
+                 NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("debug_high_availability_flag",
+                 "Stack on set high_availability. (Default: off)",
+                 TUNABLE_BOOLEAN, &gbl_debug_high_availability_flag, INTERNAL,
+                 NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("abort_on_unset_ha_flag",
+                 "Abort in snap_uid_retry if ha is unset. (Default: off)",
+                 TUNABLE_BOOLEAN, &gbl_abort_on_unset_ha_flag, INTERNAL, NULL,
+                 NULL, NULL, NULL);
+REGISTER_TUNABLE("write_dummy_trace",
+                 "Print trace when doing a dummy write. (Default: off)",
+                 TUNABLE_BOOLEAN, &gbl_write_dummy_trace, INTERNAL, NULL, NULL,
+                 NULL, NULL);
 REGISTER_TUNABLE("seed_genid", "Set genid-seed in hex for genid48 test.",
                  TUNABLE_STRING, NULL, EXPERIMENTAL | INTERNAL,
                  next_genid_value, NULL, genid_seed_update, NULL);
+REGISTER_TUNABLE("abort_on_bad_upgrade",
+                 "Abort in upgrade current-generation exceeds ctrl-gen.",
+                 TUNABLE_BOOLEAN, &gbl_abort_on_incorrect_upgrade,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("poll_in_pgfree_recover", "Poll pgfree recovery handler.",
+                 TUNABLE_BOOLEAN, &gbl_poll_in_pg_free_recover,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("rep_badgen_trace", "Trace on rep mismatched generations.",
+                 TUNABLE_BOOLEAN, &gbl_rep_badgen_trace,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("dump_zero_coherency_ts", "Enable zero-coherency-ts trace.",
+                 TUNABLE_BOOLEAN, &gbl_dump_zero_coherency_timestamp,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("allow_incoherent_sql", "Enable sql against incoherent nodes.",
+                 TUNABLE_BOOLEAN, &gbl_allow_incoherent_sql,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("rep_process_msg_print_rc", "Print rc from rep_process_msg.",
+                 TUNABLE_BOOLEAN, &gbl_rep_process_msg_print_rc,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("verbose_master_req", "Print trace showing master-req protocol.",
+                 TUNABLE_BOOLEAN, &gbl_verbose_master_req,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("verbose_send_cohlease", "Print trace from lease-issue thread.",
+                 TUNABLE_BOOLEAN, &gbl_verbose_send_coherency_lease,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+REGISTER_TUNABLE("reset_on_unelectable_cluster", "Reset master if unelectable.",
+                 TUNABLE_BOOLEAN, &gbl_reset_on_unelectable_cluster,
+                 EXPERIMENTAL | INTERNAL, NULL, NULL, NULL, NULL);
+
 
 #endif /* _DB_TUNABLES_H */

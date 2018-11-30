@@ -69,6 +69,9 @@ enum transaction_level {
 
 #define MAX_HASH_SQL_LENGTH 8192
 
+/* Static rootpages numbers. */
+enum { RTPAGE_SQLITE_MASTER = 1, RTPAGE_START = 2 };
+
 typedef struct stmt_hash_entry {
     char sql[MAX_HASH_SQL_LENGTH];
     sqlite3_stmt *stmt;
@@ -495,7 +498,7 @@ struct sqlclntstate {
     int8_t wrong_db;
     int8_t is_lua_sql_thread;
     int8_t skip_feature;
-    int8_t high_availability;
+    int8_t high_availability_flag;
     int8_t hasql_on;
 
     int8_t has_recording;
@@ -514,20 +517,19 @@ struct sqlclntstate {
 
     hash_t *ddl_tables;
     hash_t *dml_tables;
+
+    int ignore_coherency;
 };
 
 /* Query stats. */
 struct query_path_component {
-    union {
-        struct dbtable *db;           /* local db, or tmp if NULL */
-        struct fdb_tbl_ent *fdb; /* remote db */
-    } u;
+    char lcl_tbl_name[MAXTABLELEN];
+    char rmt_db[MAX_DBNAME_LENGTH];
     int ix;
     int nfind;
     int nnext;
     int nwrite;
     int nblobs;
-    int remote; /* mark this as remote, see *u */
     LINKC_T(struct query_path_component) lnk;
 };
 
@@ -735,7 +737,7 @@ struct sql_thread {
     struct sqlclntstate *sqlclntstate; /* pointer to originating sqlclnt */
     /* custom error message to send to client */
     char *error;
-    struct rootpage *rootpages;
+    struct master_entry *rootpages;
     int rootpage_nentries;
     unsigned char had_temptables;
     unsigned char had_tablescans;
@@ -824,5 +826,7 @@ uint16_t stmt_num_tbls(sqlite3_stmt *);
 int newsql_dump_query_plan(struct sqlclntstate *clnt, sqlite3 *hndl);
 void init_cursor(BtCursor *, Vdbe *, Btree *);
 void run_stmt_setup(struct sqlclntstate *, sqlite3_stmt *);
+int sql_index_name_trans(char *namebuf, int len, struct schema *schema,
+                         struct dbtable *db, int ixnum, void *trans);
 
 #endif

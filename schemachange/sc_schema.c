@@ -487,11 +487,12 @@ struct dbtable *create_db_from_schema(struct dbenv *thedb,
 }
 
 int fetch_schema_change_seed(struct schema_change_type *s, struct dbenv *thedb,
-                             unsigned long long *stored_sc_genid)
+                             unsigned long long *stored_sc_genid,
+                             unsigned int *stored_sc_host)
 {
     int bdberr;
     int rc = bdb_get_disable_plan_genid(thedb->bdb_env, NULL, stored_sc_genid,
-                                        &bdberr);
+                                        stored_sc_host, &bdberr);
     if (rc == -1 && bdberr == BDBERR_FETCH_DTA) {
         /* No seed exists, proceed. */
     } else if (rc) {
@@ -501,8 +502,9 @@ int fetch_schema_change_seed(struct schema_change_type *s, struct dbenv *thedb,
         return SC_INTERNAL_ERROR;
     } else {
         /* found some seed */
-        logmsg(LOGMSG_INFO, "stored seed %016llx, sc seed %016llx\n",
-               *stored_sc_genid, sc_seed);
+        logmsg(LOGMSG_INFO, "stored seed %016llx, sc seed %016llx, stored host "
+                            "%u, sc host %u\n",
+               *stored_sc_genid, sc_seed, *stored_sc_host, sc_host);
         logmsg(
             LOGMSG_WARN,
             "Resuming previously restarted schema change, disabling plan.\n");
@@ -1331,36 +1333,17 @@ void fix_constraint_pointers(struct dbtable *db, struct dbtable *newdb)
     }
 }
 
-static int reset_sc_from(const char *table)
-{
-    struct dbtable *db = get_dbtable_by_name(table);
-    if (db == NULL) {
-        return -1;
-    }
-
-    live_sc_off(db);
-
-    return 0;
-}
-
 void change_schemas_recover(char *table)
 {
     struct dbtable *db = get_dbtable_by_name(table);
     if (db == NULL) {
-        if (unlikely(!timepart_is_timepart(table, 1))) {
-            /* shouldn't happen */
-            logmsg(LOGMSG_ERROR, "change_schemas_recover: invalid table %s\n",
-                   table);
-            return;
-        }
+        /* shouldn't happen */
+        logmsg(LOGMSG_ERROR, "change_schemas_recover: invalid table %s\n",
+               table);
+        return;
     }
     backout_schemas(table);
-    if (db) {
-        live_sc_off(db);
-    } else {
-        /*timepart*/
-        timepart_for_each_shard(table, reset_sc_from);
-    }
+    live_sc_off(db);
 
     if (thedb->stopped) {
         resume_threads(thedb);

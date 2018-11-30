@@ -5,13 +5,45 @@ export TESTSROOTDIR:=$(shell pwd)
 
 SRCHOME:=$(shell readlink -f $(TESTSROOTDIR)/../ )
 ifeq ($(SRCHOME),)
-SRCHOME:=$(TESTSROOTDIR)/..
+  SRCHOME:=$(TESTSROOTDIR)/..
 endif
 export SRCHOME
 
 export TESTID:=$(shell tools/get_random.sh)
 CURRDIR:=$(shell pwd)
 export TESTDIR:=$(CURRDIR)/test_$(TESTID)
+# get md5sum of executable use check when running every test in a series
+
+export COMDB2AR_EXE:=$(SRCHOME)/comdb2ar
+export comdb2ar:=$(SRCHOME)/comdb2ar
+export COMDB2_EXE:=$(SRCHOME)/comdb2
+export CDB2SQL_EXE:=$(SRCHOME)/cdb2sql
+export COPYCOMDB2_EXE:=$(SRCHOME)/db/copycomdb2
+export CDB2_SQLREPLAY_EXE:=$(SRCHOME)/cdb2_sqlreplay
+export PMUX_EXE:=$(SRCHOME)/pmux
+
+
+ifeq ($(wildcard $(COMDB2_EXE)),)
+  $(error $(COMDB2_EXE) missing, please run make in $(SRCHOME))
+endif
+ifeq ($(wildcard $(COMDB2AR_EXE)),)
+  $(error $(COMDB2AR_EXE) missing, please run make in $(SRCHOME))
+endif
+ifeq ($(wildcard $(CDB2SQL_EXE)),)
+  $(error $(CDB2SQL_EXE) missing, please run make in $(SRCHOME))
+endif
+ifeq ($(wildcard $(CDB2_SQLREPLAY_EXE)),)
+  $(error $(CDB2_SQLREPLAY_EXE) missing, please run make in $(SRCHOME))
+endif
+ifeq ($(wildcard $(COPYCOMDB2_EXE)),)
+  $(error $(COPYCOMDB2_EXE) missing, please ensure it exists)
+endif
+ifeq ($(wildcard $(PMUX_EXE)),)
+  $(error $(PMUX_EXE) missing, please run make in $(SRCHOME))
+endif
+
+
+export COMDB2MD5SUM:=$(shell md5sum ${COMDB2_EXE} | cut -d ' ' -f1)
 
 
 basicops_nokey:
@@ -25,6 +57,7 @@ basicops_nokey:
 	$(shell echo "TESTDIR=${TESTDIR} " >> ${TESTDIR}/test.log)
 	$(shell echo "" >> ${TESTDIR}/test.log)
 	$(shell echo ${MAKECMDGOALS} >> ${TESTDIR}/test.log)
+
 
 basicops: basicops_nokey
 	$(shell TESTDIR="${TESTDIR}" CLUSTER="${CLUSTER}" SKIPSSL="${SKIPSSL}" tools/keygen.sh)
@@ -86,5 +119,5 @@ clean: testclean
 
 testclean:
 	@rm -rf test_[0-9]*
-	@$(foreach n, $(CLUSTER), ssh $(n) 'rm -rf *.trap; rm -rf $(TESTSROOTDIR)/test_[0-9]*';)
+	@$(foreach n, $(CLUSTER), ssh $(n) 'rm -rf *.trap; rm -rf $(TESTSROOTDIR)/test_[0-9]*' < /dev/null;)
 	@$(MAKE) -C tools clean

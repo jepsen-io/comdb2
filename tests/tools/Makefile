@@ -1,9 +1,9 @@
-ALL=hatest selectv overflow_blobtest recom stepper serial bound localrep utf8 crle
+ALL=hatest selectv overflow_blobtest recom stepper serial bound localrep utf8 crle insert register
 all:$(ALL)
 
 include ../../main.mk
 
-CDB2LIBS=$(SYSPATH) ../../cdb2api/libcdb2api.a ../../protobuf/libcdb2protobuf.a -lprotobuf-c -lpthread -lssl -lcrypto
+CDB2LIBS=$(SYSPATH) ../../cdb2api/libcdb2api.a -lprotobuf-c -lpthread -lssl -lcrypto
 
 CFLAGS+=-D_GNU_SOURCE $(CFLAGS_ARCHFLAGS)
 CXXFLAGS+=-I../../cdb2api -D__USE_XOPEN2K8
@@ -39,6 +39,12 @@ ptrantest: ptrantest.o
 	$(CC) -o $@ $^ $(LDFLAGS) $(CDB2LIBS) -lsqlite3 -lpthread
 
 crle:CFLAGS+=-I../../comdb2rle
+
+insert: insert.o nemesis.o testutil.o
+	$(CC) -o $@ $^ $(LDFLAGS) $(CDB2LIBS) -lpthread -lssl -lcrypto
+
+register: register.o nemesis.o testutil.o
+	$(CC) -o $@ $^ $(LDFLAGS) $(CDB2LIBS) -lpthread -lssl -lcrypto
 
 clean:
 	@rm -f *.o $(ALL)

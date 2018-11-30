@@ -42,7 +42,7 @@
 
 #include <plhash.h>
 #include "comdb2.h"
-#include "util.h"
+#include "util.h" /* the .h file for this .c */
 
 #include <limits.h>
 #include <float.h>
@@ -442,8 +442,8 @@ int rewrite_lrl_un_llmeta(const char *p_lrl_fname_in,
 
     /* add table definitions */
     for (i = 0; i < num_tables; ++i) {
-        if (strncmp(p_table_names[i], "sqlite_stat", sizeof("sqlite_stat")-1) ==
-            0)
+        if (strncmp(p_table_names[i], "sqlite_stat",
+                    sizeof("sqlite_stat") - 1) == 0)
             continue;
 
         sbuf2printf(sb_out, "table %s %s", p_table_names[i], p_csc2_paths[i]);
@@ -631,4 +631,38 @@ char *get_full_filename(char *path, int pathlen, enum dirtype type, char *name,
     vsnprintf(path, pathlen, name, args);
     va_end(args);
     return ret;
+}
+
+static inline char hex(unsigned char a)
+{
+    if (a < 10) return '0' + a;
+    return 'a' + (a - 10);
+}
+
+static void hexdumpbuf(char *key, int keylen, char **buf)
+{
+    char *mem;
+    char *output;
+
+    mem = malloc((2 * keylen) + 2);
+    output = util_tohex(mem, key, keylen);
+
+    *buf = output;
+}
+
+/* Return a hex string
+ * output buffer should be appropriately sized */
+uint8_t *util_tohex(uint8_t *out, const uint8_t *in, size_t len)
+{
+    uint8_t *beginning = out;
+    char hex[] = "0123456789abcdef";
+    const uint8_t *end = in + len;
+    while (in != end) {
+        uint8_t i = *(in++);
+        *(out++) = hex[(i & 0xf0) >> 4];
+        *(out++) = hex[i & 0x0f];
+    }
+    *out = 0;
+
+    return beginning;
 }

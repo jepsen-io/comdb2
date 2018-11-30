@@ -298,13 +298,18 @@ static int trans_start_int_int(struct ireq *iq, tran_type *parent_trans,
                                                 retries, &bdberr);
     } else {
         *out_trans = bdb_tran_begin_logical(bdb_handle, 0, &bdberr);
-        if (iq->tranddl && sc) {
+        if (iq->tranddl && sc && *out_trans) {
             bdb_ltran_get_schema_lock(*out_trans);
             int get_physical_transaction(bdb_state_type * bdb_state,
                                          tran_type * logical_tran,
                                          tran_type * *outtran);
             rc = get_physical_transaction(bdb_handle, *out_trans,
                                           &physical_tran);
+            if (rc == BDBERR_READONLY) {
+                trans_abort_logical(iq, *out_trans, NULL, 0, NULL, 0);
+                *out_trans = NULL;
+                bdberr = rc;
+            }
             if (rc) {
                 logmsg(LOGMSG_FATAL, "%s :failed to get physical_tran\n",
                        __func__);
@@ -341,6 +346,7 @@ int trans_start_int(struct ireq *iq, void *parent_trans, tran_type **out_trans,
 
 int trans_start_logical_sc(struct ireq *iq, tran_type **out_trans)
 {
+    iq->use_handle = thedb->bdb_env;
     return trans_start_int_int(iq, NULL, out_trans, 1, 1, 0);
 }
 
@@ -603,7 +609,13 @@ static int trans_wait_for_seqnum_int(void *bdb_handle, struct dbenv *dbenv,
     int sync;
     int start_ms, end_ms;
 
-    sync = iq->sc_pending ? REP_SYNC_FULL : dbenv->rep_sync;
+    if (iq->sc_pending) {
+        sync = REP_SYNC_FULL;
+        adaptive = 0;
+        timeoutms = -1;
+    } else {
+        sync = dbenv->rep_sync;
+    }
 
     /*wait for synchronization, if necessary */
     start_ms = time_epochms();
@@ -647,6 +659,15 @@ static int trans_wait_for_seqnum_int(void *bdb_handle, struct dbenv *dbenv,
         if (rc != 0) {
             logmsg(LOGMSG_ERROR, "*WARNING* bdb_wait_seqnum:error syncing all nodes rc %d\n",
                    rc);
+        }
+        if (iq->sc_pending) {
+            /* TODO: I dont know what to do here. Schema change is already
+            ** commited but one or more replicants didn't get the messages
+            ** to reload table.
+            */
+            logmsg(LOGMSG_INFO, "Schema change scdone sync all nodes, rc %d\n",
+                   rc);
+            rc = 0;
         }
         break;
 
@@ -3177,7 +3198,7 @@ void net_reload_schemas(void *hndl, void *uptr, char *fromnode, int usertype,
     rc = reload_schema(table, csc2, NULL);
 
     rc2 = create_sqlmaster_records(NULL);
-    create_master_tables(); /* create sql statements */
+    create_sqlite_master(); /* create sql statements */
 
     net_ack_message(hndl, rc || rc2);
 
@@ -3553,12 +3574,18 @@ int broadcast_sc_end(uint64_t seed)
     return send_to_all_nodes(&seed, sizeof(seed), NET_STOP_SC, SCWAITTIME);
 }
 
-int broadcast_sc_start(uint64_t seed, char *from, time_t t)
+const char *get_hostname_with_crc32(bdb_state_type *bdb_state,
+                                    unsigned int hash);
+int broadcast_sc_start(uint64_t seed, uint32_t host, time_t t)
 {
     struct start_sc *sc;
     int len;
+    const char *from = get_hostname_with_crc32(thedb->bdb_env, host);
+    if (from == NULL) {
+        from = "unknown";
+    }
 
-    len = offsetof(struct start_sc, host) + strlen(gbl_mynode) + 1;
+    len = offsetof(struct start_sc, host) + strlen(from) + 1;
 
     sc = alloca(len);
     sc->seed = flibc_htonll(seed);
@@ -4031,7 +4058,7 @@ void set_skipscan_for_table_indices(struct dbtable *tbl, int val)
     for (int ii = 0; ii < tbl->nix; ii++) {
         struct schema *s = tbl->ixschema[ii];
         s->disableskipscan = val;
-#ifdef DEBUG
+#ifdef DEBUGSKIPSCAN
         printf("%s: setting disableskipscan for %s.%s %d\n", __func__,
                tbl->dbname, s->sqlitetag, val);
 #endif
@@ -4062,7 +4089,7 @@ static void get_disable_skipscan(struct dbtable *tbl)
 
 void get_disable_skipscan_all() 
 {
-#if DEBUG
+#ifdef DEBUGSKIPSCAN
     logmsg(LOGMSG_WARN, "get_disable_skipscan_all() called\n");
 #endif
     for (int ii = 0; ii < thedb->num_dbs; ii++) {
@@ -5764,7 +5791,7 @@ void print_tableparams()
 
         char *tableparams = NULL;
         int tbplen = 0;
-        bdb_get_table_csonparameters(db->dbname, &tableparams, &tbplen);
+        bdb_get_table_csonparameters(NULL, db->dbname, &tableparams, &tbplen);
         if (tableparams) {
             logmsg(LOGMSG_USER, " tableparams: %10s", tableparams);
             free(tableparams);
@@ -6139,7 +6166,7 @@ int table_version_upsert(struct dbtable *db, void *trans, int *bdberr)
     //select needs to be done with the same transaction to avoid 
     //undetectable deadlock for writing and reading from same thread
     unsigned long long version;
-    rc = bdb_table_version_select(db->handle, trans, &version, bdberr);
+    rc = bdb_table_version_select(db->dbname, trans, &version, bdberr);
     if (rc || *bdberr) {
         logmsg(LOGMSG_ERROR, "%s error version=%llu rc=%d bdberr=%d\n", __func__,
                 version, rc, *bdberr);
@@ -6160,7 +6187,7 @@ unsigned long long table_version_select(struct dbtable *db, tran_type *tran)
     unsigned long long version;
     int rc;
 
-    rc = bdb_table_version_select(db->handle, tran, &version, &bdberr);
+    rc = bdb_table_version_select(db->dbname, tran, &version, &bdberr);
     if (rc || bdberr) {
         logmsg(LOGMSG_ERROR, "%s error version=%llu rc=%d bdberr=%d\n", __func__,
                 version, rc, bdberr);
@@ -6168,6 +6195,35 @@ unsigned long long table_version_select(struct dbtable *db, tran_type *tran)
     }
 
     return version;
+}
+
+/**
+ * Set schema for a specific table, used for pinning table to certain versions
+ * upon re-creation (for example)
+ *
+ */
+int table_version_set(tran_type *tran, const char *tablename,
+                      unsigned long long version)
+{
+    struct dbtable *db;
+    unsigned long long ret;
+    int rc;
+    int bdberr = 0;
+
+    if (is_tablename_queue(tablename, strlen(tablename))) return 0;
+
+    db = get_dbtable_by_name(tablename);
+    if (!db) {
+        ctrace("table unknown \"%s\"\n", tablename);
+        return -1;
+    }
+
+    rc = bdb_table_version_update(db->handle, tran, version, &bdberr);
+    if (!rc && bdberr) rc = -1;
+
+    db->tableversion = version;
+
+    return rc;
 }
 
 void *get_bdb_env(void) { return thedb->bdb_env; }

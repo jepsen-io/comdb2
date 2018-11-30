@@ -59,6 +59,7 @@
 #endif
 
 extern void fsnapf(FILE *, void *, int);
+extern int db_is_stopped(void);
 
 struct ack_info_t {
     uint32_t hdrsz;
@@ -500,7 +501,7 @@ static void *udp_reader(void *arg)
     uint8_t *p_buf, *p_buf_end;
     filepage_type fp;
 
-    while (1) {
+    while (!db_is_stopped()) {
 #ifdef UDP_DEBUG
         struct sockaddr_in addr;
         struct sockaddr_in *paddr = &addr;
@@ -625,11 +626,6 @@ static void *udp_reader(void *arg)
             print_ping_rtt(info);
             break;
 
-        case USER_TYPE_DURABLE_LSN:
-            data = ack_info_data(info);
-            receive_durable_lsn(NULL, bdb_state, from, USER_TYPE_DURABLE_LSN,
-                                data, info->len, 0);
-            break;
 
         default:
             printf("%s: recd unknown packet type:%d from:%d\n", __func__, type,
@@ -750,6 +746,8 @@ int send_myseqnum_to_master_udp(bdb_state_type *bdb_state)
     return rc;
 }
 
+int gbl_verbose_send_coherency_lease;
+
 void send_coherency_leases(bdb_state_type *bdb_state, int lease_time,
                            int *inc_wait)
 {
@@ -788,6 +786,7 @@ void send_coherency_leases(bdb_state_type *bdb_state, int lease_time,
     comcount =
         net_get_all_commissioned_nodes(bdb_state->repinfo->netinfo, comlist);
 
+
     if (count != comcount) {
         static time_t lastpr = 0;
         time_t now;
@@ -795,7 +794,8 @@ void send_coherency_leases(bdb_state_type *bdb_state, int lease_time,
         /* Assume disconnected node(s) are incoherent */
         *inc_wait = 1;
 
-        if (last_count != count || (now = time(NULL)) - lastpr) {
+        if (gbl_verbose_send_coherency_lease && (last_count != count || 
+                    (now = time(NULL)) - lastpr)) {
             char *machs = (char *)malloc(1);
             int machs_len = 0;
             machs[0] = '\0';
@@ -806,15 +806,15 @@ void send_coherency_leases(bdb_state_type *bdb_state, int lease_time,
                 strcat(machs, hostlist[i]);
                 strcat(machs, " ");
             }
-            logmsg(LOGMSG_INFO,
+            logmsg(LOGMSG_ERROR,
                     "%s: only %d of %d nodes are connected: %s epoch=%u\n",
                     __func__, count, comcount, machs, time(NULL));
             free(machs);
             lastpr = now;
         }
-    } else if (last_count != comcount) {
-        logmsg(LOGMSG_INFO, "%s: sending leases to all nodes, epoch=%u\n", __func__,
-                time(NULL));
+    } else if (gbl_verbose_send_coherency_lease && (last_count != comcount)) {
+        logmsg(LOGMSG_ERROR, "%s: sending leases to all nodes, epoch=%u\n", 
+                __func__, time(NULL));
     }
 
     last_count = count;
@@ -865,8 +865,8 @@ void send_coherency_leases(bdb_state_type *bdb_state, int lease_time,
         } else {
             static time_t lastpr = 0;
             time_t now;
-            if ((now = time(NULL)) - lastpr) {
-                logmsg(LOGMSG_INFO, "%s: not sending to %s\n", __func__,
+            if (gbl_verbose_send_coherency_lease && (now = time(NULL)) - lastpr) {
+                logmsg(LOGMSG_ERROR, "%s: not sending to %s\n", __func__,
                         hostlist[i]);
                 lastpr = now;
             }
@@ -892,82 +892,6 @@ void ping_node(bdb_state_type *bdb_state, char *to)
 {
     if (send_timestamp(bdb_state, to, USER_TYPE_TCP_TIMESTAMP) > 0) {
         debug_trace("sent ping %d -> %d", bdb_state->repinfo->mynode, to);
-    }
-}
-
-uint8_t *
-udp_durable_lsn_type_put(const udp_durable_lsn_t *p_udp_durable_lsn_type,
-                         uint8_t *p_buf, uint8_t *p_buf_end)
-{
-    if (p_buf_end < p_buf || UDP_DURABLE_LSN_TYPE_LEN > p_buf_end - p_buf)
-        return NULL;
-    p_buf = buf_put(&(p_udp_durable_lsn_type->lsn.file),
-                    sizeof(p_udp_durable_lsn_type->lsn.file), p_buf, p_buf_end);
-    p_buf =
-        buf_put(&(p_udp_durable_lsn_type->lsn.offset),
-                sizeof(p_udp_durable_lsn_type->lsn.offset), p_buf, p_buf_end);
-    p_buf =
-        buf_put(&(p_udp_durable_lsn_type->generation),
-                sizeof(p_udp_durable_lsn_type->generation), p_buf, p_buf_end);
-    return p_buf;
-}
-
-const uint8_t *
-udp_durable_lsn_type_get(udp_durable_lsn_t *p_udp_durable_lsn_type,
-                         const uint8_t *p_buf, const uint8_t *p_buf_end)
-{
-    if (p_buf_end < p_buf || UDP_DURABLE_LSN_TYPE_LEN > p_buf_end - p_buf)
-        return NULL;
-    p_buf = buf_get(&(p_udp_durable_lsn_type->lsn.file),
-                    sizeof(p_udp_durable_lsn_type->lsn.file), p_buf, p_buf_end);
-    p_buf =
-        buf_get(&(p_udp_durable_lsn_type->lsn.offset),
-                sizeof(p_udp_durable_lsn_type->lsn.offset), p_buf, p_buf_end);
-    p_buf =
-        buf_get(&(p_udp_durable_lsn_type->generation),
-                sizeof(p_udp_durable_lsn_type->generation), p_buf, p_buf_end);
-    return p_buf;
-}
-
-static void send_durable_lsn(bdb_state_type *bdb_state, const char *to,
-                             DB_LSN *lsn, uint32_t generation)
-{
-    ack_info *info;
-    uint8_t *p_buf, *p_buf_end;
-    udp_durable_lsn_t udp_durable_lsn;
-
-    new_ack_info(info, UDP_DURABLE_LSN_TYPE_LEN, bdb_state->repinfo->myhost);
-    info->from = 0;
-    info->to = 0;
-    info->type = USER_TYPE_DURABLE_LSN;
-    udp_durable_lsn.lsn = *lsn;
-    udp_durable_lsn.generation = generation;
-    p_buf = ack_info_data(info);
-    p_buf_end = p_buf + UDP_DURABLE_LSN_TYPE_LEN;
-
-    if ((p_buf = udp_durable_lsn_type_put(&udp_durable_lsn, p_buf,
-                                          p_buf_end)) == NULL)
-        abort();
-
-    // printf("sending durable lsn "PR_LSN" to %s\n", PARM_LSNP(lsn), to);
-
-    udp_send(bdb_state, info, to);
-}
-
-void udp_send_durable_lsn(bdb_state_type *bdb_state, DB_LSN *lsn, uint32_t gen)
-{
-    repinfo_type *repinfo = bdb_state->repinfo;
-    const char *nodes[REPMAX];
-
-    if (lsn->file == 0) {
-        fprintf(stderr, "Broadcasting insane durable lsn?  Aborting.\n");
-        abort();
-    }
-
-    int i = net_get_all_nodes(repinfo->netinfo, nodes);
-
-    while (i--) {
-        send_durable_lsn(bdb_state, nodes[i], lsn, gen);
     }
 }
 
@@ -1047,8 +971,8 @@ out:
     return rc;
 }
 
-
-const char * get_hostname_with_crc32(bdb_state_type *bdb_state, int hash)
+const char *get_hostname_with_crc32(bdb_state_type *bdb_state,
+                                    unsigned int hash)
 {
     repinfo_type *repinfo = bdb_state->repinfo;
     if(crc32c(repinfo->myhost, strlen(repinfo->myhost)) == hash)

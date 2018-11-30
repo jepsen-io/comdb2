@@ -72,7 +72,7 @@ int is_genid_right_of_stripe_pointer(bdb_state_type *bdb_state,
 
 /* delete from new btree when genid is older than schemachange position
  */
-int live_sc_post_delete_int(struct ireq *iq, void *trans,
+int live_sc_post_del_record(struct ireq *iq, void *trans,
                             unsigned long long genid, const void *old_dta,
                             unsigned long long del_keys,
                             blob_buffer_t *oldblobs)
@@ -81,7 +81,7 @@ int live_sc_post_delete_int(struct ireq *iq, void *trans,
 
     iq->usedb = usedb->sc_to;
     if (iq->debug) {
-        reqpushprefixf(iq, "live_sc_post_delete_int: ");
+        reqpushprefixf(iq, "%s: ", __func__);
         reqprintf(iq, "deleting genid 0x%llx from new table", genid);
     }
 
@@ -173,7 +173,7 @@ int live_sc_post_update_delayed_key_adds_int(struct ireq *iq, void *trans,
     if (!(sc_live && usedb->sc_from == iq->usedb)) {
         return 0;
     }
-#ifdef DEBUG
+#ifdef DEBUG_SC
     printf("live_sc_post_update_delayed_key_adds_int: looking at genid %llx\n",
            newgenid);
 #endif
@@ -263,14 +263,14 @@ int live_sc_post_update_delayed_key_adds_int(struct ireq *iq, void *trans,
     return rc;
 }
 
-int live_sc_post_add_int(struct ireq *iq, void *trans, unsigned long long genid,
-                         const uint8_t *od_dta, unsigned long long ins_keys,
-                         blob_buffer_t *blobs, size_t maxblobs, int origflags,
-                         int *rrn)
+int live_sc_post_add_record(struct ireq *iq, void *trans,
+                            unsigned long long genid, const uint8_t *od_dta,
+                            unsigned long long ins_keys, blob_buffer_t *blobs,
+                            size_t maxblobs, int origflags, int *rrn)
 
 {
-#ifdef DEBUG
-    printf("live_sc_post_add_int: looking at genid %llx\n", genid);
+#ifdef DEBUG_SC
+    printf("%s: looking at genid %llx\n", __func__, genid);
 #endif
     // this is an INSERT of new row so add_record to sc_to
     char *tagname = ".NEW..ONDISK";
@@ -304,19 +304,17 @@ int live_sc_post_add_int(struct ireq *iq, void *trans, unsigned long long genid,
 
     if ((origflags & RECFLAGS_NO_CONSTRAINTS) && usedb->sc_to->n_constraints) {
         int rebuild = usedb->sc_to->plan && usedb->sc_to->plan->dta_plan;
-#ifdef DEBUG
-        fprintf(stderr, "live_sc_post_add_int: need to "
-                        "verify_record_constraint genid 0x%llx\n",
-                genid);
+#ifdef DEBUG_SC
+        fprintf(stderr, "%s: need to verify_record_constraint genid 0x%llx\n",
+                __func__, genid);
 #endif
         rc = verify_record_constraint(iq, usedb->sc_to, trans, new_dta,
                                       ins_keys, blobs, maxblobs, ".NEW..ONDISK",
                                       rebuild, 0);
         if (rc) {
-            logmsg(LOGMSG_ERROR,
-                   "live_sc_post_add_int: verify_record_constraint "
-                   "rcode %d, genid 0x%llx\n",
-                   rc, genid);
+            logmsg(LOGMSG_ERROR, "%s: verify_record_constraint "
+                                 "rcode %d, genid 0x%llx\n",
+                   __func__, rc, genid);
             logmsg(LOGMSG_ERROR, "Aborting schema change due to constraint "
                                  "violation in new schema\n");
 
@@ -328,7 +326,7 @@ int live_sc_post_add_int(struct ireq *iq, void *trans, unsigned long long genid,
     }
 
     if (iq->debug) {
-        reqpushprefixf(iq, "live_sc_post_add_int: ");
+        reqpushprefixf(iq, "%s: ", __func__);
         reqprintf(iq, "adding genid 0x%llx to new table", genid);
     }
 
@@ -351,8 +349,8 @@ int live_sc_post_add_int(struct ireq *iq, void *trans, unsigned long long genid,
     iq->usedb = usedb;
 
     if (rc != 0 && rc != RC_INTERNAL_RETRY) {
-        logmsg(LOGMSG_ERROR, "live_sc_post_add_int rcode %d, genid 0x%llx\n",
-               rc, genid);
+        logmsg(LOGMSG_ERROR, "%s: rcode %d, genid 0x%llx\n", __func__, rc,
+               genid);
         logmsg(LOGMSG_ERROR,
                "Aborting schema change due to unexpected error\n");
         gbl_sc_abort = 1;
@@ -370,7 +368,7 @@ int live_sc_post_add_int(struct ireq *iq, void *trans, unsigned long long genid,
 
 /* both new and old are to the left of SC ptr, need to update
  */
-int live_sc_post_update_int(struct ireq *iq, void *trans,
+int live_sc_post_upd_record(struct ireq *iq, void *trans,
                             unsigned long long oldgenid, const void *old_dta,
                             unsigned long long newgenid, const void *new_dta,
                             unsigned long long ins_keys,
@@ -380,10 +378,10 @@ int live_sc_post_update_int(struct ireq *iq, void *trans,
 {
     struct dbtable *usedb = iq->usedb;
 
-#ifdef DEBUG
-    fprintf(stderr, "live_sc_post_update_int: oldgenid 0x%llx, newgenid "
+#ifdef DEBUG_SC
+    fprintf(stderr, "%s: oldgenid 0x%llx, newgenid "
                     "0x%llx, deferredAdd %d\n",
-            oldgenid, newgenid, deferredAdd);
+            __func__, oldgenid, newgenid, deferredAdd);
 #endif
 
     int rc;
@@ -391,7 +389,7 @@ int live_sc_post_update_int(struct ireq *iq, void *trans,
     iq->usedb = usedb->sc_to;
 
     if (iq->debug) {
-        reqpushprefixf(iq, "live_sc_post_update_int: ");
+        reqpushprefixf(iq, "%s: ", __func__);
         reqprintf(iq,
                   "updating genid 0x%llx to 0x%llx in new table (defered=%d)",
                   oldgenid, newgenid, deferredAdd);
@@ -402,10 +400,8 @@ int live_sc_post_update_int(struct ireq *iq, void *trans,
                         oldblobs, newblobs);
     iq->usedb = usedb;
     if (rc != 0 && rc != RC_INTERNAL_RETRY) {
-        logmsg(LOGMSG_ERROR,
-               "live_sc_post_update_int: rcode %d for update genid "
-               "0x%llx to 0x%llx\n",
-               rc, oldgenid, newgenid);
+        logmsg(LOGMSG_ERROR, "%s: rcode %d for update genid 0x%llx to 0x%llx\n",
+               __func__, rc, oldgenid, newgenid);
         logmsg(LOGMSG_ERROR,
                "Aborting schema change due to unexpected error\n");
         gbl_sc_abort = 1;
@@ -660,7 +656,7 @@ int scdone_callback(bdb_state_type *bdb_state, const char table[],
                    table);
             exit(1);
         }
-        create_master_tables();
+        create_sqlite_master();
         ++gbl_dbopen_gen;
         goto done;
     } else if (type == bulkimport) {
@@ -687,7 +683,7 @@ int scdone_callback(bdb_state_type *bdb_state, const char table[],
                    table);
             exit(1);
         }
-        create_master_tables(); /* create sql statements */
+        create_sqlite_master(); /* create sql statements */
 
         /* update the delayed deleted files */
         assert(db && !add_new_db);
@@ -781,7 +777,7 @@ void getMachineAndTimeFromFstSeed(const char **mach, time_t *timet)
      * it was done. */
     unsigned int *iptr = (unsigned int *)&sc_seed;
 
-    *mach = get_hostname_with_crc32(thedb->bdb_env, ntohl(iptr[1]));
+    *mach = get_hostname_with_crc32(thedb->bdb_env, sc_host);
     *timet = ntohl(iptr[0]);
     return;
 }

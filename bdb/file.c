@@ -97,6 +97,8 @@
 #include "dbinc/log.h"
 #include "dbinc/txn.h"
 
+#include <bdb_queuedb.h>
+
 extern int gbl_bdblock_debug;
 extern int gbl_keycompr;
 extern int gbl_early;
@@ -1387,7 +1389,7 @@ static void send_decom_all(bdb_state_type *bdb_state, char *decom_node)
     int i;
     int rc;
     int len;
-#if DEBUG
+#ifdef DEBUG
     printf("send_decom_all() entering...");
 #endif
 
@@ -1424,6 +1426,10 @@ static int closedbs_int(bdb_state_type *bdb_state, int nosync)
     if (!bdb_state->isopen) {
         print(bdb_state, "%s not open, not closing\n", bdb_state->name);
         return 0;
+    }
+
+    if (bdb_state->bdbtype == BDBTYPE_QUEUEDB) {
+        bdb_trigger_close(bdb_state);
     }
 
     for (dtanum = 0; dtanum < MAXDTAFILES; dtanum++) {
@@ -3163,6 +3169,11 @@ done2:
         }
     }
 
+    int tmpnode;
+    int attempts = bdb_state->attr->startup_sync_attempts;
+    uint8_t *p_buf = (uint8_t *)&tmpnode;
+    uint8_t *p_buf_end = ((uint8_t *)&tmpnode + sizeof(int));
+
     /*
       PHASE 4:
       finally now that we believe we are caught up and are no longer lying
@@ -3170,14 +3181,13 @@ done2:
       forward and wait for us to reach the same LSN.  when we pass this
       phase, we are truly cache coherent.
       */
-    if (bdb_state->repinfo->master_host != myhost) {
-        int tmpnode, attempts = bdb_state->attr->startup_sync_attempts;
-        uint8_t *p_buf = (uint8_t *)&tmpnode;
-        uint8_t *p_buf_end = ((uint8_t *)&tmpnode + sizeof(int));
 
-    again:
-        buf_put(&(bdb_state->repinfo->master_host), sizeof(int), p_buf,
-                p_buf_end);
+again:
+    buf_put(&(bdb_state->repinfo->master_host), sizeof(int), p_buf,
+            p_buf_end);
+
+    if (bdb_state->repinfo->master_host != myhost) {
+
         /* now we have the master checkpoint and WAIT for us to ack the seqnum,
            thus making sure we are actually LIVE */
         rc = net_send_message(
@@ -4715,13 +4725,10 @@ static int bdb_downgrade_int(bdb_state_type *bdb_state, int noelect,
         *downgraded = 0;
 
     retries = 0;
-    while (!bdb_state->repinfo->upgrade_allowed) {
-        if (++retries > 100) {
-            logmsg(LOGMSG_DEBUG, "bdb_downgrade: not allowed (bdb_open has not "
-                            "completed yet)\n");
-            return 0;
-        }
-        poll(NULL, 0, 100);
+    if (!bdb_state->repinfo->upgrade_allowed) {
+        logmsg(LOGMSG_DEBUG, "bdb_downgrade: not allowed (bdb_open has not "
+                "completed yet)\n");
+        return 0;
     }
 
     /* if we were passed a child, find his parent */
@@ -5003,6 +5010,7 @@ static int bdb_upgrade_downgrade_reopen_wrap(bdb_state_type *bdb_state, int op,
         (bdb_state->callback->whoismaster_rtn)(bdb_state,
                                                bdb_state->repinfo->master_host);
 
+    allow_sc_to_run();
     BDB_RELLOCK();
 
     watchdog_cancel_alarm();
@@ -5270,11 +5278,6 @@ bdb_open_int(int envonly, const char name[], const char dir[], int lrl,
         rc = pthread_mutex_init(&bdb_state->durable_lsn_lk, NULL);
         if (rc) {
             logmsg(LOGMSG_FATAL, "durable_lsn_lk failed\n");
-            exit(1);
-        }
-        rc = pthread_cond_init(&bdb_state->durable_lsn_wait, NULL);
-        if (rc) {
-            logmsg(LOGMSG_FATAL, "durable_lsn_wait failed\n");
             exit(1);
         }
     }

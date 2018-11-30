@@ -1873,8 +1873,7 @@ static void log_cost(struct reqlogger *logger, int64_t cost, int64_t rows) {
 static void log_client_context(struct reqlogger *logger,
                                struct sqlclntstate *clnt)
 {
-    if (clnt->sql_query == NULL)
-        return;
+    if (clnt->sql_query == NULL) return;
 
     if (clnt->sql_query->n_context > 0) {
         int i = 0;
@@ -1889,9 +1888,8 @@ static void log_client_context(struct reqlogger *logger,
         /* Latch the context - client only re-sends context if
            it changes.  TODO: this seems needlessly expensive. */
         clnt->ncontext = clnt->sql_query->n_context;
-        if (clnt->context)
-            free(clnt->context);
-        clnt->context = malloc(sizeof(char*) * clnt->sql_query->n_context);
+        if (clnt->context) free(clnt->context);
+        clnt->context = malloc(sizeof(char *) * clnt->sql_query->n_context);
         for (int i = 0; i < clnt->sql_query->n_context; i++)
             clnt->context[i] = strdup(clnt->sql_query->context[i]);
     }
@@ -3101,17 +3099,23 @@ static int reload_analyze(struct sqlthdstate *thd, struct sqlclntstate *clnt)
     extern volatile int analyze_running_flag;
     if (analyze_running_flag)
         return 0;
-    int rc;
-    if ((rc = get_curtran(thedb->bdb_env, clnt)) != 0) {
-        logmsg(LOGMSG_ERROR, "%s get_curtran rc:%d\n", __func__, rc);
-        return SQLITE_INTERNAL;
+    int rc, got_curtran;
+    rc = got_curtran = 0;
+    if (!clnt->dbtran.cursor_tran) {
+        if ((rc = get_curtran(thedb->bdb_env, clnt)) != 0) {
+            logmsg(LOGMSG_ERROR, "%s get_curtran rc:%d\n", __func__, rc);
+            return SQLITE_INTERNAL;
+        }
+        got_curtran = 1;
     }
     if ((rc = sqlite3AnalysisLoad(thd->sqldb, 0)) == SQLITE_OK) {
         thd->analyze_gen = gbl_analyze_gen;
     } else {
         logmsg(LOGMSG_ERROR, "%s sqlite3AnalysisLoad rc:%d\n", __func__, rc);
     }
-    put_curtran(thedb->bdb_env, clnt);
+    if (got_curtran && put_curtran(thedb->bdb_env, clnt)) {
+        logmsg(LOGMSG_ERROR, "%s failed to put_curtran\n", __func__);
+    }
     return rc;
 }
 
@@ -3339,6 +3343,7 @@ int release_locks(const char *trace)
 {
     struct sql_thread *thd = pthread_getspecific(query_info_key);
     struct sqlclntstate *clnt = thd ? thd->sqlclntstate : NULL;
+    int rc = 0;
 
     if (clnt && clnt->dbtran.cursor_tran) {
         extern int gbl_sql_release_locks_trace;
@@ -3346,9 +3351,9 @@ int release_locks(const char *trace)
             logmsg(LOGMSG_USER, "Releasing locks for lockid %d, %s\n",
                    bdb_get_lid_from_cursortran(clnt->dbtran.cursor_tran),
                    trace);
-        recover_deadlock_silent(thedb->bdb_env, thd, NULL, -1);
+        rc = recover_deadlock_silent(thedb->bdb_env, thd, NULL, -1);
     }
-    return 0;
+    return rc;
 }
 
 int release_locks_on_emit_row(struct sqlthdstate *thd,
@@ -3510,7 +3515,8 @@ void thr_set_current_sql(const char *sql)
     }
 }
 
-static void setup_reqlog_new_sql(struct sqlthdstate *thd, struct sqlclntstate *clnt)
+static void setup_reqlog_new_sql(struct sqlthdstate *thd,
+                                 struct sqlclntstate *clnt)
 {
     char info_nvreplays[40];
     info_nvreplays[0] = '\0';
@@ -3526,7 +3532,8 @@ static void setup_reqlog_new_sql(struct sqlthdstate *thd, struct sqlclntstate *c
     log_queue_time(thd->logger, clnt);
 }
 
-static void query_stats_setup(struct sqlthdstate *thd, struct sqlclntstate *clnt)
+static void query_stats_setup(struct sqlthdstate *thd,
+                              struct sqlclntstate *clnt)
 {
     /* debug */
     thr_set_current_sql(clnt->sql);
@@ -5419,7 +5426,7 @@ static int handle_sqlite_requests(struct sqlthdstate *thd,
         if (rc) {
             int irc = errstat_get_rc(&err);
             /* certain errors are saved, in that case we don't send anything */
-            if(irc == ERR_PREPARE || irc == ERR_PREPARE_RETRY) {
+            if (irc == ERR_PREPARE || irc == ERR_PREPARE_RETRY) {
                 if(comm->send_prepare_error)
                     comm->send_prepare_error(clnt, err.errstr, 
                                              (irc == ERR_PREPARE_RETRY));
@@ -5668,6 +5675,8 @@ static void sqlengine_work_lua_thread(struct thdpool *pool, void *work,
     thrman_setid(thrman_self(), "[done]");
 }
 
+int gbl_debug_sqlthd_failures;
+
 static void sqlengine_work_appsock(struct thdpool *pool, void *work,
                                    void *thddata)
 {
@@ -5710,9 +5719,17 @@ static void sqlengine_work_appsock(struct thdpool *pool, void *work,
         unlock_schema_lk();
     }
 
-
-    if (unlikely(!thd->sqldb)) {
+    int debug_appsock;
+    if (unlikely(!thd->sqldb) ||
+        (gbl_debug_sqlthd_failures && (debug_appsock = !(rand() % 1000)))) {
         /* unplausable, but anyway */
+        logmsg(LOGMSG_ERROR, "%s line %d: exiting on null thd->sqldb\n",
+               __func__, __LINE__);
+        if (debug_appsock) {
+            logmsg(LOGMSG_ERROR,
+                   "%s line %d: testing null thd->sqldb codepath\n", __func__,
+                   __LINE__);
+        }
         clnt->query_rc = -1;
         pthread_mutex_lock(&clnt->wait_mutex);
         clnt->done = 1;
@@ -5753,10 +5770,23 @@ static void sqlengine_work_appsock(struct thdpool *pool, void *work,
 
     /* Set whatever mode this client needs */
     rc = sql_set_transaction_mode(thd->sqldb, clnt, clnt->dbtran.mode);
-    if (rc) {
+    if (rc ||
+        (gbl_debug_sqlthd_failures && (debug_appsock = !(rand() % 1000)))) {
+        logmsg(LOGMSG_ERROR,
+               "%s line %d: unable to set_transaction_mode rc=%d!\n", __func__,
+               __LINE__, rc);
+        if (debug_appsock) {
+            logmsg(LOGMSG_ERROR, "%s line %d: testing failed set-transaction "
+                                 "codepath\n",
+                   __func__, __LINE__);
+        }
         send_prepare_error(clnt, "Failed to set transaction mode.", 0);
         reqlog_logf(thd->logger, REQL_TRACE,
                     "Failed to set transaction mode.\n");
+        if (put_curtran(thedb->bdb_env, clnt)) {
+            logmsg(LOGMSG_ERROR,
+                   "%s: unable to destroy a CURSOR transaction!\n", __func__);
+        }
         clnt->query_rc = 0;
         pthread_mutex_lock(&clnt->wait_mutex);
         clnt->done = 1;
@@ -6120,11 +6150,29 @@ static void sqlengine_thd_start(struct thdpool *pool, void *thddata)
                 bdb_attr_get(thedb->bdb_attr, BDB_ATTR_RCACHE_PGSZ));
 }
 
+int gbl_abort_invalid_query_info_key;
+
 static void sqlengine_thd_end(struct thdpool *pool, void *thddata)
 {
     void rcache_destroy(void);
     rcache_destroy();
     struct sqlthdstate *thd = thddata;
+    struct sql_thread *sqlthd;
+
+    if ((sqlthd = pthread_getspecific(query_info_key)) != NULL) {
+        /* sqlclntstate shouldn't be set: sqlclntstate is memory on another
+         * thread's stack that will not be valid at this point. */
+
+        if (sqlthd->sqlclntstate) {
+            logmsg(LOGMSG_ERROR,
+                   "%s:%d sqlthd->sqlclntstate set in thd-teardown\n", __FILE__,
+                   __LINE__);
+            if (gbl_abort_invalid_query_info_key) {
+                abort();
+            }
+            sqlthd->sqlclntstate = NULL;
+        }
+    }
 
     if (thd->stmt_table)
         delete_stmt_table(thd->stmt_table);
@@ -7605,14 +7653,25 @@ retry:
         }
         if (rc == 0) { // descriptor not ready, write will block
             if (gbl_sql_release_locks_on_slow_reader && !released_locks) {
-                release_locks("slow reader");
+                rc = release_locks("slow reader");
+                if (rc) {
+                    logmsg(LOGMSG_ERROR,
+                           "%s release_locks generation changed\n", __func__);
+                    return -1;
+                }
                 released_locks = 1;
             }
 
             if (bdb_lock_desired(thedb->bdb_env)) {
                 struct sql_thread *thd = pthread_getspecific(query_info_key);
                 if (thd) {
-                    recover_deadlock(thedb->bdb_env, thd, NULL, 0);
+                    rc = recover_deadlock(thedb->bdb_env, thd, NULL, 0);
+                    if (rc) {
+                        logmsg(LOGMSG_ERROR,
+                               "%s recover_deadlock generation changed\n",
+                               __func__);
+                        return -1;
+                    }
                 }
             }
 

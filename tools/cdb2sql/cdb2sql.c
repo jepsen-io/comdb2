@@ -229,16 +229,16 @@ void *get_val(const char **sqlstr, int type, int *vallen)
         return NULL;
     }
     if (type == CDB2_INTEGER) {
-        int i = atol(*sqlstr);
-        int *val = malloc(sizeof(int));
+        int64_t i = atol(*sqlstr);
+        int64_t *val = malloc(sizeof(int64_t));
         *val = i;
-        *vallen = sizeof(int);
+        *vallen = sizeof(*val);
         return val;
     } else if (type == CDB2_REAL) {
         double d = atof(*sqlstr);
         double *val = malloc(sizeof(double));
         *val = d;
-        *vallen = sizeof(int);
+        *vallen = sizeof(*val);
         return val;
     } else if (type == CDB2_CSTRING) {
         char *val = strndup(*sqlstr, end - (*sqlstr));
@@ -387,7 +387,7 @@ void printCol(FILE *f, cdb2_hndl_tp *cdb2h, void *val, int col, int printmode)
             fputc('\'', stdout);
         } else {
             if (printmode == BINARY) {
-                int rc = write(1, val, cdb2_column_size(cdb2h, col));
+                write(1, val, cdb2_column_size(cdb2h, col));
                 exit(0);
             } else {
                 fprintf(f, "x'");

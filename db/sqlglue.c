@@ -683,9 +683,9 @@ static int ondisk_to_sqlite_tz(struct db *db, struct schema *s, void *inp,
     else
         nField = s->nmembers;
 
-    m = (Mem*) alloca (sizeof(Mem)* (nField+1)); // Extra 1 for genid
+    m = (Mem *)alloca(sizeof(Mem) * (nField + 1)); // Extra 1 for genid
 
-    type = (u32*) alloca(sizeof(u32) * (nField+1));
+    type = (u32 *)alloca(sizeof(u32) * (nField + 1));
 
 #ifdef debug_raw
     printf("convert => %s %s %d / %d\n", db->dbname, s->tag, nField,
@@ -698,7 +698,8 @@ static int ondisk_to_sqlite_tz(struct db *db, struct schema *s, void *inp,
         rc = get_data_int(pCur, s, in, fnum, &m[fnum], 1, tzname);
         if (rc)
             goto done;
-        type[fnum] = sqlite3VdbeSerialType(&m[fnum], SQLITE_DEFAULT_FILE_FORMAT, &sz);
+        type[fnum] =
+            sqlite3VdbeSerialType(&m[fnum], SQLITE_DEFAULT_FILE_FORMAT, &sz);
         datasz += sz;
         hdrsz += sqlite3VarintLen(type[fnum]);
     }
@@ -711,7 +712,8 @@ static int ondisk_to_sqlite_tz(struct db *db, struct schema *s, void *inp,
         m[fnum].u.i = genid;
         m[fnum].flags = MEM_Int;
 
-        type[fnum] = sqlite3VdbeSerialType(&m[fnum], SQLITE_DEFAULT_FILE_FORMAT, &sz);
+        type[fnum] =
+            sqlite3VdbeSerialType(&m[fnum], SQLITE_DEFAULT_FILE_FORMAT, &sz);
         datasz += sz;
         hdrsz += sqlite3VarintLen(type[fnum]);
         ncols++;
@@ -747,7 +749,7 @@ static int ondisk_to_sqlite_tz(struct db *db, struct schema *s, void *inp,
         // TODO: verify that this works as before
         sz = sqlite3VdbeSerialPut(dtabuf, &m[fnum], type[fnum]);
         dtabuf += sz;
-        sz = sqlite3PutVarint( hdrbuf, type[fnum]);
+        sz = sqlite3PutVarint(hdrbuf, type[fnum]);
         hdrbuf += sz;
         assert(hdrbuf <= (out + hdrsz));
     }
@@ -2632,6 +2634,9 @@ static int cursor_move_table(BtCursor *pCur, int *pRes, int how)
 
     bdberr = 0;
     rc = ddguard_bdb_cursor_move(thd, pCur, 0, &bdberr, how, NULL, 0);
+    if (bdberr == BDBERR_NOT_DURABLE) {
+        return SQLITE_CLIENT_CHANGENODE;
+    }
     if (bdberr == BDBERR_TRANTOOCOMPLEX) {
         return SQLITE_TRANTOOCOMPLEX;
     }
@@ -2780,6 +2785,9 @@ static int cursor_move_index(BtCursor *pCur, int *pRes, int how)
     }
 
     rc = ddguard_bdb_cursor_move(thd, pCur, 0, &bdberr, how, &iq, 0);
+    if (bdberr == BDBERR_NOT_DURABLE) {
+        return SQLITE_CLIENT_CHANGENODE;
+    }
     if (bdberr == BDBERR_TRANTOOCOMPLEX) {
         return SQLITE_TRANTOOCOMPLEX;
     }
@@ -3202,19 +3210,21 @@ static int cursor_move_postop(BtCursor *pCur)
     struct sqlclntstate *clnt = thd->sqlclntstate;
     extern int gbl_sql_release_locks_on_si_lockwait;
     extern int gbl_locks_check_waiters;
+    int rc = 0;
 
     if (gbl_locks_check_waiters && gbl_sql_release_locks_on_si_lockwait &&
         (clnt->dbtran.mode == TRANLEVEL_SNAPISOL ||
          clnt->dbtran.mode == TRANLEVEL_SERIAL)) {
         extern int gbl_sql_random_release_interval;
-        if (bdb_curtran_has_waiters(thedb->bdb_env, clnt->dbtran.cursor_tran))
-            release_locks("replication is waiting on si-session");
-        else if (gbl_sql_random_release_interval &&
-                 !(rand() % gbl_sql_random_release_interval))
-            release_locks("random release cursor_move_postop");
+        if (bdb_curtran_has_waiters(thedb->bdb_env, clnt->dbtran.cursor_tran)) {
+            rc = release_locks("replication is waiting on si-session");
+        } else if (gbl_sql_random_release_interval &&
+                   !(rand() % gbl_sql_random_release_interval)) {
+            rc = release_locks("random release cursor_move_postop");
+        }
     }
 
-    return 0;
+    return rc;
 }
 
 int temp_table_cmp(KeyInfo *pKeyInfo, int k1len, const void *key1, int k2len,
@@ -9128,6 +9138,8 @@ int sqlite3BtreeLockTable(Btree *p, int iTab, u8 isWriteLock) { return 0; }
 int osql_check_shadtbls(bdb_state_type *bdb_env, struct sqlclntstate *clnt,
                         char *file, int line);
 
+int gbl_random_get_curtran_failures;
+
 int get_curtran(bdb_state_type *bdb_state, struct sqlclntstate *clnt)
 {
     cursor_tran_t *curtran_out = NULL;
@@ -9146,6 +9158,11 @@ int get_curtran(bdb_state_type *bdb_state, struct sqlclntstate *clnt)
 
     if (clnt->dbtran.cursor_tran) {
         logmsg(LOGMSG_ERROR, "%s called when we have a curtran\n", __func__);
+        return -1;
+    }
+
+    if (gbl_random_get_curtran_failures && !(rand() % 1000)) {
+        logmsg(LOGMSG_ERROR, "%s forcing a random curtran failure\n", __func__);
         return -1;
     }
 
@@ -10027,8 +10044,13 @@ static int ddguard_bdb_cursor_move(struct sql_thread *thd, BtCursor *pCur,
         rc = IX_PASTEOF;
     }
 
-    if (*bdberr == 0)
-        cursor_move_postop(pCur);
+    if (*bdberr == 0) {
+        int rc2 = cursor_move_postop(pCur);
+        if (rc2) {
+            rc = SQLITE_CLIENT_CHANGENODE;
+            *bdberr = BDBERR_NOT_DURABLE;
+        }
+    }
 
     return rc;
 }
@@ -10652,14 +10674,28 @@ int sqlite3BtreeCount(BtCursor *pCur, i64 *pnEntry)
     } else if (pCur->cursor_count) {
         rc = pCur->cursor_count(pCur, &count);
     } else if (gbl_direct_count && !pCur->clnt->intrans &&
+               pCur->clnt->dbtran.mode != TRANLEVEL_SNAPISOL &&
+               pCur->clnt->dbtran.mode != TRANLEVEL_SERIAL &&
                (pCur->cursor_class == CURSORCLASS_TABLE ||
                 pCur->cursor_class == CURSORCLASS_INDEX)) {
-        rc = bdb_direct_count(pCur->bdbcur, pCur->ixnum, (int64_t *)&count);
+        int nretries = 0;
+        int max_retries = gbl_move_deadlk_max_attempt >= 0
+                              ? gbl_move_deadlk_max_attempt
+                              : 500;
+        do {
+            rc = bdb_direct_count(pCur->bdbcur, pCur->ixnum, (int64_t *)&count);
+            if (rc == BDBERR_DEADLOCK &&
+                recover_deadlock(thedb->bdb_env, thd, NULL, 0)) {
+                break;
+            }
+        } while (rc == BDBERR_DEADLOCK && nretries++ < max_retries);
         if (rc == 0) {
             pCur->nfind++;
             pCur->nmove += count;
             thd->had_tablescans = 1;
             thd->cost += pCur->find_cost + (pCur->move_cost * count);
+        } else if (rc == BDBERR_DEADLOCK) {
+            rc = SQLITE_DEADLOCK;
         }
     } else {
         int res;
@@ -11567,10 +11603,12 @@ void clone_temp_table(sqlite3 *dest, const sqlite3 *src, const char *sql,
     Btree *s = &src->aDb[1].pBt[0];
     comdb2_use_tmptbl_lk(1);
     tmptbl_kludge = &s->temp_tables[rootpg];
+    dest->force_sqlite_impl = 1;
     if ((rc = sqlite3_exec(dest, sql, NULL, NULL, &err)) != 0) {
         logmsg(LOGMSG_ERROR, "%s rc:%d err:%s sql:%s\n", __func__, rc, err, sql);
         abort();
     }
+    dest->force_sqlite_impl = 0;
     comdb2_use_tmptbl_lk(0);
     tmptbl_kludge = NULL;
 }

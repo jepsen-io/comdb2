@@ -48,6 +48,7 @@ static const char revid[] = "$Id: txn.c,v 11.219 2003/12/03 14:33:06 bostic Exp 
 #include <stdlib.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <cheapstack.h>
 
 
 #if TIME_WITH_SYS_TIME
@@ -540,11 +541,16 @@ __txn_begin_int_int(txn, internal, retries, we_start_at_this_lsn)
 	SH_TAILQ_INSERT_HEAD(&region->active_txn, td, links, __txn_detail);
 
 	id = ++region->last_txnid;
+
 	++region->stat.st_nbegins;
 	if (++region->stat.st_nactive > region->stat.st_maxnactive)
 		region->stat.st_maxnactive = region->stat.st_nactive;
 
 	td->txnid = id;
+
+    fprintf(stderr, "td %u (%x) txnid = %u (%x)\n", (uint32_t)pthread_self(), (uint32_t)pthread_self(), td->txnid, td->txnid);
+    cheap_stack_trace();
+
 	ZERO_LSN(td->last_lsn);
 	td->begin_lsn = begin_lsn;
 	if (txn->parent != NULL)
